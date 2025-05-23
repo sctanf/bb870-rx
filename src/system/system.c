@@ -1,4 +1,4 @@
-#include "globals.h"
+#include <zephyr/logging/log.h>
 
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/pwm.h>
@@ -53,27 +53,12 @@ static int sys_nvs_init(void)
 
 SYS_INIT(sys_nvs_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
 
-// TODO: switch back to retained?
-uint8_t reboot_counter_read(void)
-{
-	uint8_t reboot_counter;
-	nvs_read(&fs, RBT_CNT_ID, &reboot_counter, sizeof(reboot_counter));
-	return reboot_counter;
-}
-
-void reboot_counter_write(uint8_t reboot_counter)
-{
-	nvs_write(&fs, RBT_CNT_ID, &reboot_counter, sizeof(reboot_counter));
-}
-
-// retained not implemented
 void sys_write(uint16_t id, void *retained_ptr, const void *data, size_t len)
 {
 	sys_nvs_init();
 	nvs_write(&fs, id, data, len);
 }
 
-// reading from nvs
 void sys_read(uint16_t id, void *data, size_t len)
 {
 	sys_nvs_init();

@@ -1,96 +1,65 @@
-/*
-	SlimeVR Code is placed under the MIT license
-	Copyright (c) 2025 SlimeVR Contributors
-
-	Permission is hereby granted, free of charge, to any person obtaining a copy
-	of this software and associated documentation files (the "Software"), to deal
-	in the Software without restriction, including without limitation the rights
-	to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-	copies of the Software, and to permit persons to whom the Software is
-	furnished to do so, subject to the following conditions:
-
-	The above copyright notice and this permission notice shall be included in
-	all copies or substantial portions of the Software.
-
-	THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-	IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-	FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-	AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-	LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-	OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-	THE SOFTWARE.
-*/
-#include "globals.h"
+#include <zephyr/logging/log.h>
 #include "system/system.h"
-#include "hid.h"
 
 #include <zephyr/drivers/clock_control/nrf_clock_control.h>
 #include <zephyr/sys/crc.h>
 
 #include "esb.h"
 
+#define MAX_TRACKERS 3
+
+static uint8_t stored_trackers = 0;
+static uint64_t stored_tracker_addr[MAX_TRACKERS] = {0};
+
 static struct esb_payload rx_payload;
-//static struct esb_payload tx_payload = ESB_CREATE_PAYLOAD(0,
-//														  0, 0, 0, 0, 0, 0, 0, 0);
-static struct esb_payload tx_payload_pair = ESB_CREATE_PAYLOAD(0,
-														  0, 0, 0, 0, 0, 0, 0, 0);
-//static struct esb_payload tx_payload_timer = ESB_CREATE_PAYLOAD(0,
-//														  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
-static struct esb_payload tx_payload_sync = ESB_CREATE_PAYLOAD(0,
-														  0, 0, 0, 0);
+static struct esb_payload tx_payload = ESB_CREATE_PAYLOAD(0, 0, 0, 0, 0);
+static struct esb_payload tx_payload_pair = ESB_CREATE_PAYLOAD(0, 0, 0, 0, 0, 0, 0, 0, 0);
 
 uint8_t pairing_buf[8] = {0};
-static uint8_t discovered_trackers[256] = {0};
 
 LOG_MODULE_REGISTER(esb_event, LOG_LEVEL_INF);
 
-static void esb_packet_filter_thread(void);
-K_THREAD_DEFINE(esb_packet_filter_thread_id, 256, esb_packet_filter_thread, NULL, NULL, NULL, 6, 0, 0);
-
 static void esb_thread(void);
 K_THREAD_DEFINE(esb_thread_id, 1024, esb_thread, NULL, NULL, NULL, 6, 0, 0);
+
+static int16_t pot_val = 0.35 * 32767;
+static int64_t last_data_sent = 0;
+
+int16_t get_val(void)
+{
+	if (last_data_sent && k_uptime_get() - last_data_sent > 1000)
+	{
+		pot_val = 0;
+	}
+	return pot_val;
+}
+
+void set_bat(uint8_t bat)
+{
+	tx_payload.data[0] = bat;
+	tx_payload.data[1] = bat;
+}
 
 void event_handler(struct esb_evt const *event)
 {
 	switch (event->evt_id)
 	{
 	case ESB_EVENT_TX_SUCCESS:
-		LOG_DBG("TX SUCCESS");
 		break;
 	case ESB_EVENT_TX_FAILED:
-		LOG_DBG("TX FAILED");
 		break;
 	case ESB_EVENT_RX_RECEIVED:
-	// make tx payload for ack here
-		if (!esb_read_rx_payload(&rx_payload)) // zero, rx success
-		{
-			switch (rx_payload.length)
-			{
-			case 8:
-				LOG_INF("RX Pairing Packet");
+		if (esb_read_rx_payload(&rx_payload) == 0) {
+			if (rx_payload.length == 8) {
 				memcpy(pairing_buf, rx_payload.data, 8);
 				esb_write_payload(&tx_payload_pair); // Add to TX buffer
-				break;
-			case 16:
-				uint8_t imu_id = rx_payload.data[1];
-				if (imu_id >= stored_trackers) // not a stored tracker
-					return;
-				if (discovered_trackers[imu_id] < DETECTION_THRESHOLD) // garbage filtering of nonexistent tracker
-				{
-					discovered_trackers[imu_id]++;
-					return;
-				}
-				if (rx_payload.data[0] > 223) // reserved for receiver only
-					break;
-				hid_write_packet_n(rx_payload.data, rx_payload.rssi); // write to hid endpoint
-				break;
-			default:
-				break;
+			} else if (rx_payload.length == 10) {
+				if (rx_payload.data[0] != rx_payload.data[2]) break;
+				if (rx_payload.data[1] != rx_payload.data[3]) break;
+				pot_val = (int16_t)rx_payload.data[0] << 8 | rx_payload.data[1];
+				last_data_sent = k_uptime_get();
+				esb_write_payload(&tx_payload); // Add to TX buffer
 			}
-		}
-		else
-		{
-			LOG_ERR("Error while reading rx packet");
 		}
 		break;
 	}
@@ -159,7 +128,7 @@ int esb_initialize(bool tx)
 		// config.protocol = ESB_PROTOCOL_ESB_DPL;
 		// config.mode = ESB_MODE_PTX;
 		config.event_handler = event_handler;
-		// config.bitrate = ESB_BITRATE_2MBPS;
+		config.bitrate = ESB_BITRATE_1MBPS;
 		// config.crc = ESB_CRC_16BIT;
 		config.tx_output_power = 8;
 		// config.retransmit_delay = 600;
@@ -173,7 +142,7 @@ int esb_initialize(bool tx)
 		// config.protocol = ESB_PROTOCOL_ESB_DPL;
 		config.mode = ESB_MODE_PRX;
 		config.event_handler = event_handler;
-		// config.bitrate = ESB_BITRATE_2MBPS;
+		config.bitrate = ESB_BITRATE_1MBPS;
 		// config.crc = ESB_CRC_16BIT;
 		config.tx_output_power = 8;
 		// config.retransmit_delay = 600;
@@ -201,7 +170,6 @@ int esb_initialize(bool tx)
 	if (err)
 	{
 		LOG_ERR("ESB initialization failed: %d", err);
-		set_status(SYS_STATUS_CONNECTION_ERROR, true);
 		return err;
 	}
 
@@ -260,7 +228,6 @@ void esb_pair(void)
 	uint64_t *addr = (uint64_t *)NRF_FICR->DEVICEADDR; // Use device address as unique identifier (although it is not actually guaranteed, see datasheet)
 	memcpy(&tx_payload_pair.data[2], addr, 6);
 	LOG_INF("Device address: %012llX", *addr & 0xFFFFFFFFFFFF);
-	set_led(SYS_LED_PATTERN_SHORT, SYS_LED_PRIORITY_CONNECTION);
 	esb_pairing = true;
 	while (esb_pairing)
 	{
@@ -270,7 +237,6 @@ void esb_pair(void)
 		{
 			if (found_addr != 0 && stored_tracker_addr[i] == found_addr)
 			{
-				//LOG_INF("Found device linked to id %d with address %012llX", i, found_addr);
 				send_tracker_id = i;
 			}
 		}
@@ -281,22 +247,17 @@ void esb_pair(void)
 		{
 			LOG_INF("Added device on id %d with address %012llX", stored_trackers, found_addr);
 			stored_tracker_addr[stored_trackers] = found_addr;
-			sys_write(STORED_ADDR_0+stored_trackers, NULL, &stored_tracker_addr[stored_trackers], sizeof(stored_tracker_addr[0]));
+			sys_write(STORED_ADDR_0 + stored_trackers, NULL, &stored_tracker_addr[stored_trackers], sizeof(stored_tracker_addr[0]));
 			stored_trackers++;
 			sys_write(STORED_TRACKERS, NULL, &stored_trackers, sizeof(stored_trackers));
-			set_led(SYS_LED_PATTERN_ONESHOT_PROGRESS, SYS_LED_PRIORITY_HIGHEST);
 		}
 		if (checksum == pairing_buf[0] && send_tracker_id < MAX_TRACKERS) // Make sure the dongle is not full
 			tx_payload_pair.data[0] = pairing_buf[0]; // Use checksum sent from device to make sure packet is for that device
 		else
 			tx_payload_pair.data[0] = 0; // Invalidate packet
 		tx_payload_pair.data[1] = send_tracker_id; // Add tracker id to packet
-		//esb_flush_rx();
-		//esb_flush_tx();
-		//esb_write_payload(&tx_payload_pair); // Add to TX buffer
 		k_msleep(10);
 	}
-	set_led(SYS_LED_PATTERN_OFF, SYS_LED_PRIORITY_CONNECTION);
 	esb_disable();
 	esb_receive();
 }
@@ -320,34 +281,10 @@ void esb_clear(void)
 	esb_reset_pair();
 }
 
-// TODO:
-void esb_write_sync(uint16_t led_clock)
-{
-	if (!esb_initialized || !esb_paired)
-		return;
-	tx_payload_sync.noack = false;
-	tx_payload_sync.data[0] = (led_clock >> 8) & 255;
-	tx_payload_sync.data[1] = led_clock & 255;
-	esb_write_payload(&tx_payload_sync);
-}
-
-// TODO:
 void esb_receive(void)
 {
 	esb_set_addr_paired();
 	esb_paired = true;
-}
-
-static void esb_packet_filter_thread(void)
-{
-	memset(discovered_trackers, 0, sizeof(discovered_trackers));
-	while (1) // reset count if its not above threshold
-	{
-		k_msleep(1000);
-		for (int i = 0; i < 256; i++)
-			if (discovered_trackers[i] < DETECTION_THRESHOLD)
-				discovered_trackers[i] = 0;
-	}
 }
 
 static void esb_thread(void)
@@ -358,7 +295,7 @@ static void esb_thread(void)
 	if (stored_trackers)
 		esb_paired = true;
 	for (int i = 0; i < stored_trackers; i++)
-		sys_read(STORED_ADDR_0+i, &stored_tracker_addr[i], sizeof(stored_tracker_addr[0]));
+		sys_read(STORED_ADDR_0 + i, &stored_tracker_addr[i], sizeof(stored_tracker_addr[0]));
 	LOG_INF("%d/%d devices stored", stored_trackers, MAX_TRACKERS);
 
 	if (esb_paired)
