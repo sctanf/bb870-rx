@@ -22,7 +22,7 @@ LOG_MODULE_REGISTER(esb_event, LOG_LEVEL_INF);
 static void esb_thread(void);
 K_THREAD_DEFINE(esb_thread_id, 1024, esb_thread, NULL, NULL, NULL, 6, 0, 0);
 
-static int16_t pot_val = 0.35 * 32767;
+static int16_t pot_val = 0.4 * 32767; // default to 35%, least annoying tone
 static int64_t last_data_sent = 0;
 
 int16_t get_val(void)
