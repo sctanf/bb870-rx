@@ -37,6 +37,10 @@ static const struct gpio_dt_spec charger_enable = GPIO_DT_SPEC_GET(DT_PATH(zephy
 static const struct gpio_dt_spec motor_enable = GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), motor_enable_gpios);
 static const struct gpio_dt_spec sys_enable = GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), sys_enable_gpios);
 
+static bool battery_enabled = false; 
+static bool psu_enabled = false; 
+static bool charger_enabled = false; 
+
 static void battery_thread(void)
 {
 	while (1)
@@ -117,31 +121,42 @@ static void motor_thread(void)
 	float last_pwm = 0;
 	while (1) {
 		float duty_cycle = get_val() / 32767.0f;
-		duty_cycle = (duty_cycle < 0.1f && duty_cycle > 0) ? 0.1f : duty_cycle;
-		duty_cycle = duty_cycle < 0 ? 0 : duty_cycle;
-		duty_cycle = duty_cycle > 1 ? 1 : duty_cycle;
 		if (duty_cycle > 0.1f) {
-			duty_cycle = (duty_cycle - 0.1f) / 0.9f * 0.675f + 0.125f; // limit to 80%
+			duty_cycle = (duty_cycle - 0.1f) / 0.9f * 0.89f + 0.11f;
 		}
+		if (motor_source && duty_cycle > 0.6f) {
+			duty_cycle = 0.6f; // limit to 60% on PSU
+		}
+//		duty_cycle = (duty_cycle < 0.1f && duty_cycle > 0) ? 0.1f : duty_cycle;
+//		duty_cycle = duty_cycle < 0 ? 0 : duty_cycle;
+//		duty_cycle = duty_cycle > 1 ? 1 : duty_cycle;
+//		if (duty_cycle > 0.1f) {
+//			duty_cycle = (duty_cycle - 0.1f) / 0.9f * 0.675f + 0.125f; // limit to 80%
+//		}
+//		motor_pwm = duty_cycle;
+//		int step = duty_cycle / 0.125f;
+//		float step_pwm = (duty_cycle - step * 0.125f) / 0.125f;
+//		int sub_pwm = step_pwm * PWM_PERIOD;
+//		duty_cycle = step * 0.125f;
+//		if (k_uptime_get() % PWM_PERIOD < sub_pwm) {
+//			duty_cycle += 0.125f;
+//		}
 		motor_pwm = duty_cycle;
-		int step = duty_cycle / 0.125f;
-		float step_pwm = (duty_cycle - step * 0.125f) / 0.125f;
-		int sub_pwm = step_pwm * PWM_PERIOD;
-		duty_cycle = step * 0.125f;
-		if (k_uptime_get() % PWM_PERIOD < sub_pwm) {
-			duty_cycle += 0.125f;
-		}
-		if (duty_cycle != last_pwm) {
+		if (duty_cycle != 0 || duty_cycle != last_pwm) {
+			if (duty_cycle == 0 && k_uptime_get() - last_pwm_time < 500) {
+				duty_cycle = 0.1f;
+			} else {
+				last_pwm_time = k_uptime_get();
+			}
 			last_pwm = duty_cycle;
-			last_pwm_time = k_uptime_get();
 			if (motor_state == false) {
-				printk("Motor started\n");
+				printk("Motor starting\n");
 				motor_state = true;
 			}
-			pwm_set_pulse_dt(&motor_pwm_channel, motor_pwm_channel.period * duty_cycle);
+			pwm_set_pulse_dt(&motor_pwm_channel, motor_state_actual ? motor_pwm_channel.period * duty_cycle : 0);
 		} else if (motor_state == true && motor_pwm == 0 && k_uptime_get() - last_pwm_time > 5000) {
 			motor_state = false;
-			printk("Motor stopped\n");
+			printk("Motor stopping\n");
 		}
 		if (motor_state_actual == true) {
 			k_usleep(100);
@@ -163,24 +178,54 @@ static void power_thread(void)
 	while (1) {
 		if (psu_mV > 24000 && charger_state == false) {
 			printk("Enabling charger\n");
+			charger_enabled = true;
 			gpio_pin_set_dt(&charger_enable, 1);
 			charger_state = true;
 		} else if (psu_mV < 23000 && charger_state == true) {
 			printk("Disabling charger\n");
+			charger_enabled = false;
 			gpio_pin_set_dt(&charger_enable, 0);
 			charger_state = false;
 		}
-		if (gpio_pin_get_dt(&sys_enable) == 0 || (battery_mV && (battery_mV < 18000))) {
+		if (gpio_pin_get_dt(&sys_enable) == 0 || (battery_mV && (battery_mV < 3000 * 7))) {
 			if (gpio_pin_get_dt(&sys_enable) == 0) {
 				nrf_gpio_cfg_sense_input(NRF_PIN_PORT_TO_PIN_NUMBER(sys_enable.pin, 1), NRF_GPIO_PIN_PULLUP, NRF_GPIO_PIN_SENSE_LOW);
 			} else {
 				nrf_gpio_cfg_sense_input(NRF_PIN_PORT_TO_PIN_NUMBER(sys_enable.pin, 1), NRF_GPIO_PIN_PULLUP, NRF_GPIO_PIN_SENSE_HIGH);
 			}
 			printk("System off\n");
+			set_val(0);
+			battery_enabled = false;
+			psu_enabled = false;
 			gpio_pin_set_dt(&motor_enable, 0);
 			gpio_pin_set_dt(&battery_enable, 0);
 			gpio_pin_set_dt(&psu_enable, 0);
-			k_msleep(1000); // grace period
+			motor_state_actual = false;
+			while (NRF_POWER->USBREGSTATUS & POWER_USBREGSTATUS_VBUSDETECT_Msk)
+			{
+				set_val(0);
+				if (gpio_pin_get_dt(&sys_enable) == 1 && (!battery_mV || (battery_mV >= 3000 * 7))) {
+					break;
+				}
+				if (psu_mV > 24000 && charger_state == false) {
+					printk("Enabling charger\n");
+					charger_enabled = true;
+					gpio_pin_set_dt(&charger_enable, 1);
+					charger_state = true;
+				} else if (psu_mV < 23000 && charger_state == true) {
+					printk("Disabling charger\n");
+					charger_enabled = false;
+					gpio_pin_set_dt(&charger_enable, 0);
+					charger_state = false;
+				}
+				k_msleep(100);
+			}
+			if (gpio_pin_get_dt(&sys_enable) == 1 && (!battery_mV || (battery_mV >= 3000 * 7))) {
+				set_val(0);
+				printk("Cancel system off\n");
+				continue;
+			}
+//			k_msleep(1000); // grace period
 			nrf_gpio_cfg_input(31, NRF_GPIO_PIN_NOPULL);
 			if (gpio_pin_get(psu_enable.port, 31)) {
 				printk("PSU on\n");
@@ -193,31 +238,47 @@ static void power_thread(void)
 			}
 			sys_request_system_off();
 		}
-		if (psu_mV > 24000 && motor_source == 0 && motor_state_actual == true) {
-			printk("Switching to PSU\n");
-			gpio_pin_set_dt(&battery_enable, 0);
-			k_busy_wait(50);
-			gpio_pin_set_dt(&psu_enable, 1);
-			printk("Done\n");
+		if (psu_mV > 24000 && motor_source == 0) {
+			if (motor_state_actual == true) {
+				printk("Switching to PSU\n");
+				battery_enabled = false;
+				gpio_pin_set_dt(&battery_enable, 0);
+				k_busy_wait(50);
+				gpio_pin_set_dt(&psu_enable, 1);
+				psu_enabled = true;
+				printk("Done\n");
+			} else {
+				printk("Source set to PSU\n");
+			}
 			motor_source = 1;
 		}
-		if (psu_mV < 23000 && motor_source == 1 && motor_state_actual == true) {
-			printk("Switching to Battery\n");
-			gpio_pin_set_dt(&psu_enable, 0);
-			k_busy_wait(50);
-			gpio_pin_set_dt(&battery_enable, 1);
-			printk("Done\n");
+		if (psu_mV < 23000 && motor_source == 1) {
+			if (motor_state_actual == true) {
+				printk("Switching to Battery\n");
+				psu_enabled = false;
+				gpio_pin_set_dt(&psu_enable, 0);
+				k_busy_wait(50);
+				gpio_pin_set_dt(&battery_enable, 1);
+				battery_enabled = true;
+				printk("Done\n");
+			} else {
+				printk("Source set to Battery\n");
+			}
 			motor_source = 0;
 		}
 		if (motor_state) {
 			if (motor_state_actual == false) {
+				battery_enabled = false;
+				psu_enabled = false;
 				gpio_pin_set_dt(&battery_enable, 0);
 				gpio_pin_set_dt(&psu_enable, 0);
 				k_busy_wait(50);
 				if (motor_source == 0) {
+					battery_enabled = true;
 					gpio_pin_set_dt(&battery_enable, 1);
 					printk("Enabling battery\n");
 				} else {
+					psu_enabled = true;
 					gpio_pin_set_dt(&psu_enable, 1);
 					printk("Enabling PSU\n");
 				}
@@ -226,6 +287,8 @@ static void power_thread(void)
 			}
 			gpio_pin_set_dt(&motor_enable, 1);
 		} else {
+			battery_enabled = false;
+			psu_enabled = false;
 			gpio_pin_set_dt(&motor_enable, 0);
 			gpio_pin_set_dt(&battery_enable, 0);
 			gpio_pin_set_dt(&psu_enable, 0);
@@ -244,7 +307,7 @@ K_THREAD_DEFINE(power_thread_id, 512, power_thread, NULL, NULL, NULL, 6, 0, 0);
 int main(void)
 {
 	while (1) {
-		printk("PSU %5dmV, Bat %6.2f%% (%5dmV), PWM %6.2f%%, Mtr %d (%d), Src %d, Chg %d\n", psu_mV, battery_pptt / 100.0, battery_mV, (double)motor_pwm * 100, motor_state, motor_state_actual, motor_source, charger_state);
+		printk("PSU %5dmV, Bat %6.2f%% (%5dmV), PWM %6.2f%%, Mtr %d (%d), Src %d, Chg %d, B %d, P %d, C %d\n", psu_mV, battery_pptt / 100.0, battery_mV, (double)motor_pwm * 100, motor_state, motor_state_actual, motor_source, charger_state, battery_enabled, psu_enabled, charger_enabled);
 		k_msleep(500);
 	}
 	return 0;
