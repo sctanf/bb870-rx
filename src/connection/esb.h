@@ -4,6 +4,7 @@
 #include <esb.h>
 
 int16_t get_val(void);
+void set_val(int16_t val);
 void set_bat(uint8_t bat);
 
 void event_handler(struct esb_evt const *event);

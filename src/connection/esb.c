@@ -22,7 +22,7 @@ LOG_MODULE_REGISTER(esb_event, LOG_LEVEL_INF);
 static void esb_thread(void);
 K_THREAD_DEFINE(esb_thread_id, 1024, esb_thread, NULL, NULL, NULL, 6, 0, 0);
 
-static int16_t pot_val = 0.4 * 32767; // default to 35%, least annoying tone
+static int16_t pot_val = 0.4 * 32767;
 static int64_t last_data_sent = 0;
 
 int16_t get_val(void)
@@ -32,6 +32,11 @@ int16_t get_val(void)
 		pot_val = 0;
 	}
 	return pot_val;
+}
+
+void set_val(int16_t val)
+{
+	pot_val = val;
 }
 
 void set_bat(uint8_t bat)
