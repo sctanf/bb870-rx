@@ -23,17 +23,10 @@ LOG_MODULE_REGISTER(battery, CONFIG_ADC_LOG_LEVEL);
 #define VBATT DT_PATH(battery_divider)
 #define ZEPHYR_USER DT_PATH(zephyr_user)
 
-#ifdef CONFIG_BOARD_THINGY52_NRF52832
-/* This board uses a divider that reduces max voltage to
- * reference voltage (600 mV).
+/* maximum input voltage is 29.4V into 2.2MOhm/220kOhm divider
+ * -> 2673mV at ADC input, so adc gain 1/5 for 3000mV max
  */
-#define BATTERY_ADC_GAIN ADC_GAIN_1
-#else
-/* Other boards may use dividers that only reduce battery voltage to
- * the maximum supported by the hardware (3.6 V)
- */
-#define BATTERY_ADC_GAIN ADC_GAIN_1_4
-#endif
+#define BATTERY_ADC_GAIN ADC_GAIN_1_5
 
 struct io_channel_config {
 	uint8_t channel;
@@ -258,7 +251,7 @@ unsigned int read_batt()
 
 	battery_measure_enable(false);
 
-	return battery_level_pptt(batt_mV / 6, levels);
+	return battery_level_pptt(batt_mV / 7, levels);
 }
 
 unsigned int read_batt_mV(int *out)
@@ -280,5 +273,5 @@ unsigned int read_batt_mV(int *out)
 	battery_measure_enable(false);
 
 	*out = batt_mV;
-	return battery_level_pptt(batt_mV / 6, levels);
+	return battery_level_pptt(batt_mV / 7, levels);
 }
