@@ -19,13 +19,13 @@
 	battery-divider {
 		compatible = "voltage-divider";
 		status = "okay";
-		io-channels = <&adc 5>;
+		io-channels = <&adc 0>;
 		output-ohms = <220000>;
 		full-ohms = <2420000>;
 	};
 
 	zephyr,user {
-		io-channels = <&adc 7>;
+		io-channels = <&adc 1>;
 		pwms = <&pwm0 0 PWM_KHZ(5) PWM_POLARITY_NORMAL>;
 		tachometer-gpios = <&gpio0 11 GPIO_PULL_UP>;
 		chg-enable-gpios = <&gpio0 17 GPIO_OPEN_SOURCE>;
@@ -45,12 +45,30 @@
 	#size-cells = <0>;
 	status = "okay";
 
-	channel@7 {
-		reg = <7>;
+/* maximum input voltage is 29.4V into 2.2MOhm/220kOhm divider
+ * -> 2673mV at ADC input, so adc gain 1/5 for 3000mV max
+ */
+	channel@0 {
+		reg = <0>;
+		zephyr,gain = "ADC_GAIN_1_5";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS, 40)>;
+		zephyr,differential;
+		zephyr,input-positive = <NRF_SAADC_AIN5>;
+		zephyr,input-negative = <NRF_SAADC_AIN0>;
+		zephyr,resolution = <14>;
+		zephyr,oversampling = <4>;
+	};
+
+// PSU
+	channel@1 {
+		reg = <1>;
 		zephyr,gain = "ADC_GAIN_1_4";
 		zephyr,reference = "ADC_REF_INTERNAL";
 		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS, 10)>;
+		zephyr,differential;
 		zephyr,input-positive = <NRF_SAADC_AIN7>;
+		zephyr,input-negative = <NRF_SAADC_AIN0>;
 		zephyr,resolution = <12>;
 		zephyr,oversampling = <2>;
 	};
@@ -66,6 +84,24 @@
 
 &gpiote {
 	status = "okay";
+};
+
+&i2c0 {
+	compatible = "nordic,nrf-twim";
+	status = "okay";
+	clock-frequency = <I2C_BITRATE_FAST>;
+	pinctrl-0 = <&i2c0_default>;
+	pinctrl-1 = <&i2c0_sleep>;
+	pinctrl-names = "default", "sleep";
+
+	bmp388: bmp388@76 {
+		compatible = "bosch,bmp388";
+		reg = <0x76>;
+		odr = "100";
+		osr-press = <2>;
+		osr-temp = <1>;
+		iir-filter = <1>;
+	};
 };
 
 &pwm0 {

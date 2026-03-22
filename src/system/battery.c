@@ -23,10 +23,7 @@ LOG_MODULE_REGISTER(battery, CONFIG_ADC_LOG_LEVEL);
 #define VBATT DT_PATH(battery_divider)
 #define ZEPHYR_USER DT_PATH(zephyr_user)
 
-/* maximum input voltage is 29.4V into 2.2MOhm/220kOhm divider
- * -> 2673mV at ADC input, so adc gain 1/5 for 3000mV max
- */
-#define BATTERY_ADC_GAIN ADC_GAIN_1_5
+static const struct adc_dt_spec bat_adc_channel = ADC_DT_SPEC_GET(DT_PATH(battery_divider));
 
 struct io_channel_config {
 	uint8_t channel;
@@ -77,11 +74,9 @@ static struct divider_data divider_data = {
 static int divider_setup(void)
 {
 	const struct divider_config *cfg = &divider_config;
-	const struct io_channel_config *iocp = &cfg->io_channel;
 	const struct gpio_dt_spec *gcp = &cfg->power_gpios;
 	struct divider_data *ddp = &divider_data;
 	struct adc_sequence *asp = &ddp->adc_seq;
-	struct adc_channel_cfg *accp = &ddp->adc_cfg;
 	int rc;
 
 	if (!device_is_ready(ddp->adc)) {
@@ -103,34 +98,13 @@ static int divider_setup(void)
 	}
 
 	*asp = (struct adc_sequence){
-		.channels = BIT(0),
 		.buffer = &ddp->raw,
 		.buffer_size = sizeof(ddp->raw),
-		.oversampling = 4,
 		.calibrate = true,
 	};
 
-#ifdef CONFIG_ADC_NRFX_SAADC
-	*accp = (struct adc_channel_cfg){
-		.gain = BATTERY_ADC_GAIN,
-		.reference = ADC_REF_INTERNAL,
-		.acquisition_time = ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS, 40),
-	};
-
-	if (cfg->output_ohm != 0) {
-		accp->input_positive = 1 // SAADC_CH_PSELP_PSELP_AnalogInput0
-			+ iocp->channel;
-	} else {
-		accp->input_positive = 9; // SAADC_CH_PSELP_PSELP_VDD
-	}
-
-	asp->resolution = 14;
-#else /* CONFIG_ADC_var */
-#error Unsupported ADC
-#endif /* CONFIG_ADC_var */
-
-	rc = adc_channel_setup(ddp->adc, accp);
-	LOG_INF("Setup AIN%u got %d", iocp->channel, rc);
+	rc = adc_channel_setup_dt(&bat_adc_channel);
+	adc_sequence_init_dt(&bat_adc_channel, asp);
 
 	return rc;
 }
@@ -172,15 +146,12 @@ int battery_sample(void)
 		const struct divider_config *dcp = &divider_config;
 		struct adc_sequence *sp = &ddp->adc_seq;
 
-		rc = adc_read(ddp->adc, sp);
+		rc = adc_read_dt(&bat_adc_channel, sp);
 		sp->calibrate = false;
 		if (rc == 0) {
 			int32_t val = ddp->raw;
 
-			adc_raw_to_millivolts(adc_ref_internal(ddp->adc),
-					      ddp->adc_cfg.gain,
-					      sp->resolution,
-					      &val);
+			adc_raw_to_millivolts_dt(&bat_adc_channel, &val);
 
 			if (dcp->output_ohm != 0) {
 				rc = val * (uint64_t)dcp->full_ohm

@@ -4,6 +4,7 @@
 #include <zephyr/drivers/adc.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/pwm.h>
+#include <zephyr/drivers/sensor.h>
 #include <hal/nrf_gpio.h>
 
 #include "system/power.h"
@@ -18,6 +19,11 @@ int16_t battery_pptt = 0;
 static int32_t psu_mV = 0;
 
 static const struct adc_dt_spec psu_adc_channel = ADC_DT_SPEC_GET(DT_PATH(zephyr_user));
+
+static float bmp_pressure = 0;
+static float bmp_temperature = 0;
+
+static const struct device *const bmp = DEVICE_DT_GET_ANY(bosch_bmp388);
 
 #define PWM_PERIOD 100
 
@@ -37,9 +43,9 @@ static const struct gpio_dt_spec charger_enable = GPIO_DT_SPEC_GET(DT_PATH(zephy
 static const struct gpio_dt_spec motor_enable = GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), motor_enable_gpios);
 static const struct gpio_dt_spec sys_enable = GPIO_DT_SPEC_GET(DT_PATH(zephyr_user), sys_enable_gpios);
 
-static bool battery_enabled = false; 
-static bool psu_enabled = false; 
-static bool charger_enabled = false; 
+static bool battery_enabled = false;
+static bool psu_enabled = false;
+static bool charger_enabled = false;
 
 static void battery_thread(void)
 {
@@ -63,11 +69,10 @@ static void psu_thread(void)
 	};
 
 	adc_channel_setup_dt(&psu_adc_channel);
+	adc_sequence_init_dt(&psu_adc_channel, &sequence);
 
 	while (1) {
 		int32_t val_mv;
-
-		adc_sequence_init_dt(&psu_adc_channel, &sequence);
 
 		adc_read_dt(&psu_adc_channel, &sequence);
 
@@ -76,14 +81,41 @@ static void psu_thread(void)
 		psu_mV = val_mv * (uint64_t)2420000 / 220000;
 
 		if (motor_state_actual == true) {
-			k_usleep(1);
+			k_msleep(1);
 		} else {
 			k_msleep(100);
 		}
 	}
 }
 
-K_THREAD_DEFINE(psu_thread_id, 512, psu_thread, NULL, NULL, NULL, 6, 0, 0);
+K_THREAD_DEFINE(psu_thread_id, 512, psu_thread, NULL, NULL, NULL, 6, 0, 50);
+
+static void bmp_thread(void)
+{
+	struct sensor_value tmp;
+	static float pres_offset = NAN;
+
+	while (1)
+	{
+		if (sensor_sample_fetch(bmp))
+		{
+			printk("Failed to fetch sample from BMP388 device\n");
+			return;
+		}
+
+		sensor_channel_get(bmp, SENSOR_CHAN_PRESS, &tmp);
+		if (isnan(pres_offset))
+			pres_offset = sensor_value_to_float(&tmp);
+		bmp_pressure = sensor_value_to_float(&tmp) - pres_offset;
+
+		sensor_channel_get(bmp, SENSOR_CHAN_AMBIENT_TEMP, &tmp);
+		bmp_temperature = sensor_value_to_float(&tmp);
+
+		k_msleep(5);
+	}
+}
+
+K_THREAD_DEFINE(bmp_thread_id, 512, bmp_thread, NULL, NULL, NULL, 6, 0, 0);
 
 /*
 off (0) 0.0
@@ -159,7 +191,7 @@ static void motor_thread(void)
 			printk("Motor stopping\n");
 		}
 		if (motor_state_actual == true) {
-			k_usleep(100);
+			k_msleep(1);
 		} else {
 			k_msleep(100);
 		}
@@ -308,7 +340,8 @@ int main(void)
 {
 	while (1) {
 		printk("PSU %5dmV, Bat %6.2f%% (%5dmV), PWM %6.2f%%, Mtr %d (%d), Src %d, Chg %d, B %d, P %d, C %d\n", psu_mV, battery_pptt / 100.0, battery_mV, (double)motor_pwm * 100, motor_state, motor_state_actual, motor_source, charger_state, battery_enabled, psu_enabled, charger_enabled);
-		k_msleep(500);
+		printk("Internal: %6.2f kPa, %6.2f C\n", (double)bmp_pressure, (double)bmp_temperature);
+		k_msleep(100);
 	}
 	return 0;
 }
